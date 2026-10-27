@@ -1,0 +1,3 @@
+{"timestamp":"2026-10-27T09:00:00-04:00","severity":"INFO","message":"Synthetic service started","source":"demo-api","metadata":{"version":"0.1"}}
+{"timestamp":"2026-10-27T13:00:01Z","severity":"WARNING","message":"Synthetic upstream response was slow","source":"demo-api","metadata":{"duration_ms":850}}
+{"timestamp":"2026-10-27T13:00:02Z","severity":"ERROR","message":"Synthetic upstream request timed out","source":"demo-api","metadata":{"retry":1}}

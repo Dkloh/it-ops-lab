@@ -12,8 +12,10 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.config import Settings
 from app.database import make_engine
 from app.inventory import DuplicateService, ServiceNotFound
+from app.log_ingestion import BatchNotFound
+from app.log_routes import router as log_router
 from app.logging import configure_logging
-from app.models import Service
+from app.models import IngestionError, LogBatch, LogEvent, Service
 from app.routes import router
 
 
@@ -34,12 +36,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
     app.state.engine = engine
     app.include_router(router)
+    app.include_router(log_router)
 
     @app.exception_handler(DuplicateService)
     async def duplicate_service(request, exc):
         return JSONResponse(
             status_code=409, content={"detail": "Service already exists in environment"}
         )
+
+    @app.exception_handler(BatchNotFound)
+    async def missing_batch(request, exc):
+        return JSONResponse(status_code=404, content={"detail": "Log batch not found"})
 
     @app.exception_handler(ServiceNotFound)
     async def missing_service(request, exc):
@@ -77,7 +84,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def ready():
         try:
             with engine.connect() as connection:
-                connection.execute(select(Service).limit(1))
+                for model in (Service, LogBatch, LogEvent, IngestionError):
+                    connection.execute(select(model).limit(1))
         except SQLAlchemyError:
             return JSONResponse(status_code=503, content={"status": "not_ready"})
         return HealthResponse(status="ready")
