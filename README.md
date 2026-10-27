@@ -1,7 +1,7 @@
 # IT Ops Lab
 
-An IT operations and log diagnostics portfolio project. Milestones 1–3 provide a FastAPI foundation, SQLite service inventory, and
-validated JSON Lines log ingestion. Diagnostics and a web interface are not implemented yet.
+An IT operations and log diagnostics portfolio project. Milestones 1–4 provide a FastAPI foundation, SQLite service inventory,
+validated JSON Lines ingestion, log search, and SQL summaries. Diagnostics and a web interface are not implemented yet.
 
 ## Install
 
@@ -321,4 +321,192 @@ Check migration state with `python -m alembic current` and model consistency wit
 `python -m ruff format --check .` to verify the full application. Tests use isolated,
 migrated temporary databases, including mixed/invalid records and rollback checks.
 The existing destructive reset commands also remove all batches, events and errors.
-No event-search endpoint, background ingestion, frontend, or analysis is included.
+Background ingestion, a frontend, and automated diagnosis are not included.
+
+
+## Log search and SQL analysis (Milestone 4)
+
+Update dependencies, apply the new index migration, and start from the repository root:
+
+```bash
+source .venv/bin/activate
+python -m pip install -e '.[dev]'
+python -m alembic upgrade head
+python -m uvicorn app.main:create_app --factory --reload
+```
+
+Windows PowerShell uses the same Python commands after
+`.\.venv\Scripts\Activate.ps1`; if activation is restricted, use
+`.\.venv\Scripts\python.exe` directly. Keep `IT_OPS_DATABASE_URL` the same for
+migrations and the server; in PowerShell set it with
+`$env:IT_OPS_DATABASE_URL = 'sqlite:///./it_ops_lab.db'` if overriding the default.
+The migration changes indexes only; existing ingested data is preserved. To undo
+only these indexes, stop the server and run
+`python -m alembic downgrade 998d068b4d03`; reapply with `python -m alembic upgrade head`.
+Do not use `downgrade base` to undo indexes: that destroys all application data.
+
+### Search API
+
+`GET /api/v1/log-events` supports these optional parameters, combined with AND:
+
+| Parameter | Meaning |
+| --- | --- |
+| `service_id` | Positive registered service ID, through the event's batch |
+| `batch_id` | Positive ingestion batch ID |
+| `severity` | Exactly DEBUG, INFO, WARNING, ERROR, or CRITICAL |
+| `start_time` | Inclusive ISO 8601 timestamp with timezone |
+| `end_time` | Inclusive ISO 8601 timestamp with timezone |
+| `message` | Nonempty case-insensitive literal substring (up to 8,000 characters) |
+| `offset` | Nonnegative row offset, default 0 |
+| `limit` | Page size, default 50, minimum 1, maximum 100 |
+
+Results are ordered by `occurred_at DESC, id DESC`, so timestamps tied within a
+page have a deterministic order. `total` counts matching rows before pagination.
+Unknown service/batch IDs produce an empty page; invalid filters produce 422.
+A page beyond the final row has empty `items` but retains the full matching total.
+Offset pagination can shift if another request ingests new events between pages.
+
+```bash
+curl --get 'http://127.0.0.1:8000/api/v1/log-events' \
+  --data-urlencode 'severity=ERROR' --data-urlencode 'service_id=1' \
+  --data-urlencode 'message=database connection' \
+  --data-urlencode 'start_time=2026-10-27T09:00:00-04:00' \
+  --data-urlencode 'end_time=2026-10-27T14:00:00Z' \
+  --data-urlencode 'limit=2' --data-urlencode 'offset=0'
+```
+
+Example response after uploading only `samples/retail-pos.jsonl` into service 1
+in a fresh database:
+
+```json
+{
+  "items": [
+    {"id":6,"service_id":1,"batch_id":1,"occurred_at":"2026-10-27T13:07:00Z","severity":"ERROR","message":"Database connection timed out","source":"pos-api","metadata":{"timeout_ms":3000,"attempt":3}},
+    {"id":4,"service_id":1,"batch_id":1,"occurred_at":"2026-10-27T13:05:00Z","severity":"ERROR","message":"Database connection timed out","source":"pos-api","metadata":{"timeout_ms":3000,"attempt":2}}
+  ],
+  "total": 3,
+  "offset": 0,
+  "limit": 2
+}
+```
+
+Use `offset=2&limit=2` with the same filters for the final matching record.
+`GET /api/v1/log-events/6` returns the individual event object above. A missing
+event returns 404 with `{"detail":"Log event not found"}`. Timestamps in responses
+are UTC, with `Z`. Encoded offset timestamps and `Z` refer to the same instants.
+Use URL encoding for a positive timezone offset so `+` is not decoded as a space.
+
+`message` is a literal substring: `%` and `_` are escaped, not SQL wildcards.
+SQLite's built-in case folding handles ASCII; Unicode case folding is not provided.
+All parameters are bound by SQLAlchemy, including message searches. Substring
+searches may scan matching messages, so narrow service and time first on larger data.
+
+### Summary API
+
+`GET /api/v1/log-events/summary` accepts `service_id`, `batch_id`, `start_time`, and
+`end_time`, with the same validation and inclusive UTC range rules. It does not
+accept severity, message, or pagination parameters. It returns SQL aggregates, not
+individual events. Example for the eight-record POS sample:
+
+```json
+{
+  "total": 8,
+  "by_severity": {"DEBUG":0,"INFO":4,"WARNING":1,"ERROR":3,"CRITICAL":0},
+  "by_service": [{"service_id":1,"name":"retail-pos","environment":"demo","count":8}],
+  "earliest": "2026-10-27T13:00:00Z",
+  "latest": "2026-10-27T14:00:00Z"
+}
+```
+
+All five severity keys are always present. Services with no matching events are
+omitted; service groups are sorted by ID. No matches returns `total: 0`, zero
+severity counts, empty `by_service`, and null `earliest`/`latest`. The response
+contains one aggregate row per matching service; it is not capped to 100 services.
+The database scans matching rows for counts without loading individual events
+into Python. Counts and event pages are intended for local investigations, not
+an immutable snapshot during concurrent ingestion.
+
+### Swagger testing
+
+Open `http://127.0.0.1:8000/docs` in your local browser. Under **log search**, expand
+GET `/api/v1/log-events`, choose **Try it out**, enter filters, and execute. The
+parameter descriptions/types and response schemas are generated from Pydantic.
+Copy an event ID into GET `/api/v1/log-events/{event_id}`. Try `/summary` separately;
+the static summary route is registered before the event ID route. Omit unused
+fields rather than sending empty strings. Use the upload CLI examples to seed data.
+
+### Retail POS troubleshooting walkthrough (PowerShell)
+
+This example uses only synthetic logs: startup and successful requests, repeated
+database timeouts, an authentication warning, and recovery. No credentials or
+customer data are included. In another PowerShell window while the server runs:
+
+```powershell
+$base = 'http://127.0.0.1:8000'
+$service = Invoke-RestMethod -Method Post -Uri "$base/api/v1/services" `
+  -ContentType 'application/json' -Body '{"name":"retail-pos","environment":"demo"}'
+$batch = Invoke-RestMethod -Method Post `
+  -Uri "$base/api/v1/services/$($service.id)/log-batches?filename=retail-pos.jsonl" `
+  -ContentType 'application/x-ndjson' -InFile '.\samples\retail-pos.jsonl'
+
+# 1. Look for errors across all services.
+$errors = Invoke-RestMethod "$base/api/v1/log-events?severity=ERROR"
+$errors.items | Format-Table id, service_id, occurred_at, message
+
+# 2. Narrow to the affected service and use a sufficiently sized page.
+$errors = Invoke-RestMethod "$base/api/v1/log-events?severity=ERROR&service_id=$($service.id)&limit=100"
+# 3. The sample has only three errors, so the final item is its earliest failure.
+$errors.items[-1].occurred_at
+
+# 4. Investigate the repeated failure phrase and a time window.
+$phrase = [uri]::EscapeDataString('database connection timed out')
+Invoke-RestMethod "$base/api/v1/log-events?service_id=$($service.id)&message=$phrase&start_time=2026-10-27T13:05:00Z&end_time=2026-10-27T13:07:00Z"
+
+# 5. Review all severity counts for this uploaded batch.
+Invoke-RestMethod "$base/api/v1/log-events/summary?batch_id=$($batch.id)"
+# 6. Retrieve an individual supporting event.
+$eventId = $errors.items[0].id
+Invoke-RestMethod "$base/api/v1/log-events/$eventId"
+```
+
+If service creation returns 409, reuse its existing ID via GET `/api/v1/services`
+or choose a different environment. Each re-upload adds another batch; filter on
+`batch_id` for reproducible counts. These examples are documented for Windows;
+validation in this task used Linux and the HTTP API.
+
+For a fresh sample batch, errors begin at **13:05 UTC**; three identical database
+timeout messages occur through **13:07 UTC**, followed by recovery at **13:10 UTC**
+and a successful request at **14:00 UTC**. Two events share a timestamp and are
+retained as separate evidence. An evidence-based hypothesis is intermittent
+database connectivity or connection-pool pressure. Check database availability,
+network reachability, and pool metrics next. The authentication warning alone does
+not establish a common cause. This milestone records/searches evidence and does
+not infer a root cause automatically. For larger datasets, page through all errors
+before claiming the final row is the earliest failure.
+
+### Search troubleshooting and implementation
+
+- 422: check uppercase severity, positive IDs, pagination bounds, timezone offsets,
+  and that start time does not exceed end time. Date-only and naive timestamps fail.
+- Empty results: verify the service/batch, use occurred-at time rather than upload
+  time, check UTC conversion, and remove filters one at a time.
+- 404 for an event: verify its ID in search; unknown filter IDs instead return an empty page.
+- Missing indexes/schema: verify `python -m alembic current`, run
+  `python -m alembic upgrade head`, then `python -m alembic check` using the same
+  database URL as the server.
+- Slow queries: narrow the service/time window and avoid large offsets. This
+  milestone adds indexes for actual batch/severity/time query patterns; it does
+  not add a full-text search engine or change stored events.
+
+`app/search_routes.py` is the HTTP adapter. `app/search_schemas.py` validates filters
+and shapes responses. `app/log_search.py` builds parameterized SQLAlchemy SELECTs:
+JOIN the batch for service ownership, AND the requested predicates, COUNT matching
+rows, then ORDER BY and apply LIMIT/OFFSET. Summary uses COUNT, MIN, MAX, and GROUP
+BY in SQL. `app/models.py` and the new Alembic migration declare the indexes;
+`app/main.py` registers routes and the missing-event handler.
+`tests/test_search.py` exercises the API, query module, migration preservation, and
+actual SQL learning examples with isolated temporary databases.
+
+Read [SQL investigations](docs/sql-investigations.md) for five runnable SQLite
+queries, their SQLAlchemy equivalents, and index trade-offs. No additional service
+or library is required. Milestone 5 diagnostics are not implemented.

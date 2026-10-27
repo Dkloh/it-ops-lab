@@ -14,9 +14,11 @@ from app.database import make_engine
 from app.inventory import DuplicateService, ServiceNotFound
 from app.log_ingestion import BatchNotFound
 from app.log_routes import router as log_router
+from app.log_search import EventNotFound
 from app.logging import configure_logging
 from app.models import IngestionError, LogBatch, LogEvent, Service
 from app.routes import router
+from app.search_routes import router as search_router
 
 
 class HealthResponse(BaseModel):
@@ -37,12 +39,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.engine = engine
     app.include_router(router)
     app.include_router(log_router)
+    app.include_router(search_router)
 
     @app.exception_handler(DuplicateService)
     async def duplicate_service(request, exc):
         return JSONResponse(
             status_code=409, content={"detail": "Service already exists in environment"}
         )
+
+    @app.exception_handler(EventNotFound)
+    async def missing_event(request, exc):
+        return JSONResponse(status_code=404, content={"detail": "Log event not found"})
 
     @app.exception_handler(BatchNotFound)
     async def missing_batch(request, exc):
