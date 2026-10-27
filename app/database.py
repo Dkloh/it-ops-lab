@@ -10,7 +10,7 @@ class Base(DeclarativeBase):
 
 
 def make_engine(url: str):
-    engine = create_engine(url, connect_args={"check_same_thread": False})
+    engine = create_engine(url, hide_parameters=True, connect_args={"check_same_thread": False})
 
     @event.listens_for(engine, "connect")
     def enable_foreign_keys(connection, _):
