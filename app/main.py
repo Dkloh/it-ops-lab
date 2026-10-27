@@ -1,12 +1,20 @@
 """Application factory and health routes."""
 
+from contextlib import asynccontextmanager
 from time import perf_counter
 
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.config import Settings
+from app.database import make_engine
+from app.inventory import DuplicateService, ServiceNotFound
 from app.logging import configure_logging
+from app.models import Service
+from app.routes import router
 
 
 class HealthResponse(BaseModel):
@@ -16,7 +24,27 @@ class HealthResponse(BaseModel):
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings if settings is not None else Settings()
     logger = configure_logging(settings.log_level)
-    app = FastAPI(title=settings.app_name, version="0.1.0")
+    engine = make_engine(settings.database_url)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        yield
+        engine.dispose()
+
+    app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
+    app.state.engine = engine
+    app.include_router(router)
+
+    @app.exception_handler(DuplicateService)
+    async def duplicate_service(request, exc):
+        return JSONResponse(
+            status_code=409, content={"detail": "Service already exists in environment"}
+        )
+
+    @app.exception_handler(ServiceNotFound)
+    async def missing_service(request, exc):
+        return JSONResponse(status_code=404, content={"detail": "Service not found"})
+
     app.state.settings = settings
 
     @app.middleware("http")
@@ -46,8 +74,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return HealthResponse(status="alive")
 
     @app.get("/health/ready", response_model=HealthResponse)
-    async def ready() -> HealthResponse:
-        # No external dependencies exist in milestone 1.
+    def ready():
+        try:
+            with engine.connect() as connection:
+                connection.execute(select(Service).limit(1))
+        except SQLAlchemyError:
+            return JSONResponse(status_code=503, content={"status": "not_ready"})
         return HealthResponse(status="ready")
 
     return app
