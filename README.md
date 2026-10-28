@@ -1,7 +1,8 @@
 # IT Ops Lab
 
-An IT operations and log diagnostics portfolio project. Milestones 1–5 provide a FastAPI foundation, SQLite service inventory,
-validated JSON Lines ingestion, log search, SQL summaries, and rule-based diagnostics.
+An IT operations and log diagnostics portfolio project. Milestones 1–6 provide a FastAPI foundation, SQLite service inventory,
+validated JSON Lines ingestion, log search, SQL summaries, rule-based diagnostics,
+and registered public-only network checks.
 A web interface is not implemented yet.
 
 ## Install
@@ -34,7 +35,7 @@ curl --fail http://127.0.0.1:8000/health/ready
 # {"status":"ready"}
 ```
 
-Liveness confirms the process can serve requests. Readiness queries the service, ingestion, and diagnostic tables and returns HTTP 503 with
+Liveness confirms the process can serve requests. Readiness queries the service, ingestion, diagnostic, and network tables and returns HTTP 503 with
 `{"status":"not_ready"}` if the database is unavailable or unmigrated.
 Liveness remains independent of database availability.
 
@@ -178,7 +179,7 @@ Pydantic serializes the returned model. The session closes after the request.
 Unique conflicts and missing services map to 409 and 404 responses respectively.
 
 SQLite suits a small local application; concurrent writes are limited. Readiness
-checks connectivity and the service, ingestion, and diagnostic schemas, not write permissions or every possible
+checks connectivity and the service, ingestion, diagnostic, and network schemas, not write permissions or every possible
 schema drift. It does not replace running migrations. No deletion endpoint,
 authentication, database retry policy, or automatic backups are included.
 
@@ -670,5 +671,141 @@ Known limits: literal phrase coverage can miss other wording or match quoted err
 analysis is batch-local and synchronous, bounded to 10,000 events, with up to three
 findings. Evidence detail returns all supporting messages, so it can be large and
 may contain sensitive original input; use synthetic logs. Diagnostic text is static,
-and logs are never executed. No background processing, scheduling, network checks,
-AI, authentication, deployment, or frontend is included. Milestone 6 is not started.
+and logs are never executed. No background processing, scheduling, AI, authentication, deployment, or frontend
+is included. Network checks are documented below.
+
+
+## Network diagnostics (Milestone 6)
+
+Register targets for a service before running DNS, TCP or HTTP(S) checks. Registration,
+GET requests, startup and migrations never initiate network checks. Only POST to the
+registered target's runs endpoint does. Checks are public-only, and unsafe resolved
+addresses are blocked again immediately before a pinned connection.
+
+### Windows setup and offline demonstration
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e '.[dev]'
+python -m alembic upgrade head
+python -m alembic check
+# Controlled offline demo: temporary database, synthetic logs, mocked public targets.
+python scripts/demo_network_diagnostics.py
+# Start the actual development API on localhost only.
+python -m uvicorn app.main:create_app --factory --reload --host 127.0.0.1
+```
+
+If activation is restricted, use `.\.venv\Scripts\python.exe` instead of `python`.
+The demo needs development dependencies. It prints SIMULATED results and does not
+contact any network destination or modify the normal development database. It joins
+the existing POS search/findings workflow to DNS success, TCP timeout and HTTP 503
+observations. PowerShell examples are documented; validation ran the Python demo
+on Linux. No private-network exception is enabled.
+
+The new Alembic revision adds `check_targets` and `check_results`, preserving existing
+logs and diagnostic findings. To deliberately remove all network history, stop the
+server and run `python -m alembic downgrade e57f984a4626`; earlier milestone data
+remains intact. Re-upgrade with `python -m alembic upgrade head`. Use disposable
+copies for migration testing because downgrade deletes network targets/results.
+
+### Optional user-initiated public checks
+
+The following only register configurations; replace `1` with an existing service ID.
+Only use hosts/ports you are authorized to diagnose. `example.com` is illustrative;
+public checks can fail under restricted egress or proxy-only environments.
+
+```powershell
+$base = 'http://127.0.0.1:8000'
+$dns = Invoke-RestMethod -Method Post -Uri "$base/api/v1/services/1/check-targets" `
+  -ContentType 'application/json' -Body '{"name":"Public DNS","check_type":"DNS","host":"example.com"}'
+$tcp = Invoke-RestMethod -Method Post -Uri "$base/api/v1/services/1/check-targets" `
+  -ContentType 'application/json' -Body '{"name":"Public TCP","check_type":"TCP","host":"example.com","port":443}'
+$http = Invoke-RestMethod -Method Post -Uri "$base/api/v1/services/1/check-targets" `
+  -ContentType 'application/json' -Body '{"name":"Public HTTPS","check_type":"HTTP","host":"example.com","scheme":"https","port":443,"path":"/","enabled":true}'
+Invoke-RestMethod "$base/api/v1/services/1/check-targets"
+```
+
+When you explicitly choose to perform the registered public checks:
+
+```powershell
+$dnsResult = Invoke-RestMethod -Method Post "$base/api/v1/check-targets/$($dns.id)/runs"
+$tcpResult = Invoke-RestMethod -Method Post "$base/api/v1/check-targets/$($tcp.id)/runs"
+$httpResult = Invoke-RestMethod -Method Post "$base/api/v1/check-targets/$($http.id)/runs"
+Invoke-RestMethod "$base/api/v1/check-targets/$($http.id)/results?offset=0&limit=50"
+Invoke-RestMethod "$base/api/v1/check-results/$($httpResult.id)"
+```
+
+Run endpoints accept no destination override; optional empty bodies reject unknown
+fields. Targets accept bare ASCII DNS hosts or public IPs, never complete URLs or
+credentials. DNS uses no port/path/scheme. TCP requires a port. HTTP defaults to
+HTTPS/443 and `/`; `scheme: "http"` defaults to port 80. Plain absolute ASCII paths
+only: no query, percent escaping, fragment, controls or protocol-relative URLs.
+`enabled` must be a real boolean, not a string. Set `enabled: false` at registration
+to create a disabled target; target editing is outside this milestone.
+
+### Example recorded observations
+
+Every expected network outcome returns HTTP 201 with a historical observation.
+These abbreviated examples are synthetic, not public-service measurements:
+
+```json
+{"id":1,"target_id":1,"outcome":"success","duration_ms":5.1,"error_code":null,"status_code":null,"details_json":{"host":"example.com","port":null,"check_type":"DNS","resolved_addresses":["93.184.216.34"]},"checked_at":"2026-10-28T14:00:00Z"}
+```
+
+```json
+{"id":2,"target_id":2,"outcome":"failure","duration_ms":3000.0,"error_code":"TIMEOUT","status_code":null,"details_json":{"host":"example.com","port":443,"check_type":"TCP","resolved_addresses":["93.184.216.34"],"connected_address":"93.184.216.34"},"checked_at":"2026-10-28T14:00:03Z"}
+```
+
+```json
+{"id":3,"target_id":3,"outcome":"failure","duration_ms":25.0,"error_code":"HTTP_STATUS","status_code":503,"details_json":{"host":"example.com","port":443,"check_type":"HTTP","resolved_addresses":["93.184.216.34"],"connected_address":"93.184.216.34","redirect_not_followed":false,"body_read":false},"checked_at":"2026-10-28T14:00:04Z"}
+```
+
+`success` means DNS resolved, TCP connected, or HTTP returned 200–399. It does not
+prove an application or database is healthy. HTTP 3xx is recorded without following
+the redirect; the redirected location is never contacted. DNS/TCP/TLS/HTTP failures
+are recorded with fixed error codes; raw exception messages and response bodies
+are not retained. `connected_address` is the selected attempt address, even on failure.
+
+Open local `/docs`, expand **network diagnostics**, create a service target, then
+use its ID on POST runs. Review the stored result via either GET endpoint. The
+interactive run executes a real public check; use the offline script for simulations.
+History arrays default to 50 rows, maximum 100, newest time then ID first. Target
+lists use the same pagination and ascending target ID. IDs must be positive integers.
+
+| Symptom | What to inspect |
+| --- | --- |
+| 422 | Bare host, check_type, type-specific port/path/scheme, strict enabled boolean, and pagination bounds. |
+| 404 | Service, target or result ID in the current configured database. |
+| 409 | Disabled target or invalid stored configuration; no network check executes. |
+| 201 with UNSAFE_DESTINATION | A DNS answer failed public-address policy; no unsafe connection occurs. |
+| DNS_ERROR / DNS_BUSY | Resolver failure or both bounded resolver workers occupied. |
+| TIMEOUT / CONNECTION_REFUSED | Reachability, filtering, listener, port, and observation time. |
+| TLS_ERROR | Certificate chain, hostname, validity and system trust; verification stays enabled. |
+| HTTP_STATUS | Exact HTTP status; a 500/503 response differs from failure to connect. |
+| RESPONSE_TOO_LARGE | Response headers or declared length exceeded availability-check limits. |
+| 503 readiness | Apply migrations using the same database URL as the server. |
+
+`IT_OPS_NETWORK_TIMEOUT_SECONDS` defaults to 3 seconds (0.1–10). DNS waiting and
+socket operations are bounded; HTTP has a shared I/O deadline and bounded header
+reads. Bodies are never consumed or persisted. DNS workers cannot forcibly cancel
+OS resolution but are capped at two, with no queued requests. Checks ignore proxy
+environment variables and do not send credentials/cookies; proxy-only environments
+may fail. Private, loopback, metadata, link-local and special-purpose IPv4/IPv6
+addresses remain blocked. The pinned HTTP backend validates the actual peer while
+preserving original-host TLS verification. No redirects or automatic retries occur.
+
+See [Network diagnostics](docs/network-diagnostics.md) for the data-flow diagram,
+error-code reference, DNS rebinding and routing limitations, transport bounds, and
+CCNA-oriented explanation. Compare each `checked_at` to historical log times;
+a successful current check cannot disprove an earlier error, and a current failure
+does not establish the cause of an earlier timeout. Cite layers and times in an
+incident hypothesis rather than asserting root cause.
+
+New modules separate destination policy (`network_security.py`), target/result
+contracts (`network_schemas.py`), network operations (`network_checks.py`), the
+pinned HTTP adapter (`network_transport.py`), persistence (`network_targets.py`), and
+routes (`network_routes.py`). Models/migration add target/result tables and history
+indexes. Automated tests mock all external operations, exercise security restrictions
+and verify migration preservation; run the existing pytest/Ruff commands above.
+No scanners, authentication, infrastructure, background jobs or frontend are added.
+Milestone 7 is not started.

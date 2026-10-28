@@ -8,6 +8,8 @@ version = "0.1.0"
 description = "IT operations and log diagnostics application"
 requires-python = ">=3.12"
 dependencies = [
+    "httpx>=0.28,<0.29",
+    "httpcore>=1.0.9,<1.1",
     "sqlalchemy>=2.0,<3",
     "alembic>=1.16,<2",
     "fastapi>=0.115,<1",
@@ -16,7 +18,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["httpx>=0.28,<1", "pytest>=8,<10", "ruff>=0.11,<1"]
+dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
 
 [tool.setuptools.packages.find]
 include = ["app*"]
