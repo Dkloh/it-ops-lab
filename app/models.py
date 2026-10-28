@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, String, UniqueConstraint
+from sqlalchemy import JSON, DateTime, ForeignKey, Index, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -33,9 +33,14 @@ class LogBatch(Base):
 
 class LogEvent(Base):
     __tablename__ = "log_events"
+    __table_args__ = (
+        Index("ix_log_events_batch_occurred", "batch_id", "occurred_at"),
+        Index("ix_log_events_severity_occurred", "severity", "occurred_at"),
+        Index("ix_log_events_occurred", "occurred_at"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    batch_id: Mapped[int] = mapped_column(ForeignKey("log_batches.id"), index=True)
+    batch_id: Mapped[int] = mapped_column(ForeignKey("log_batches.id"))
     occurred_at: Mapped[datetime] = mapped_column(DateTime())
     severity: Mapped[str] = mapped_column(String(10))
     message: Mapped[str] = mapped_column(String())
