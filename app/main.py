@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.config import Settings
+from app.dashboard_routes import router as dashboard_router
 from app.database import make_engine
 from app.diagnostic_routes import router as diagnostic_router
 from app.diagnostics import FindingNotFound, RunNotFound
@@ -56,6 +57,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(search_router)
     app.include_router(diagnostic_router)
     app.include_router(network_router)
+    app.include_router(dashboard_router)
 
     @app.exception_handler(TargetNotFound)
     async def missing_target(request, exc):
