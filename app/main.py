@@ -11,12 +11,22 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.config import Settings
 from app.database import make_engine
+from app.diagnostic_routes import router as diagnostic_router
+from app.diagnostics import FindingNotFound, RunNotFound
 from app.inventory import DuplicateService, ServiceNotFound
 from app.log_ingestion import BatchNotFound
 from app.log_routes import router as log_router
 from app.log_search import EventNotFound
 from app.logging import configure_logging
-from app.models import IngestionError, LogBatch, LogEvent, Service
+from app.models import (
+    DiagnosticRun,
+    Finding,
+    FindingEvent,
+    IngestionError,
+    LogBatch,
+    LogEvent,
+    Service,
+)
 from app.routes import router
 from app.search_routes import router as search_router
 
@@ -40,6 +50,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(router)
     app.include_router(log_router)
     app.include_router(search_router)
+    app.include_router(diagnostic_router)
+
+    @app.exception_handler(RunNotFound)
+    async def missing_run(request, exc):
+        return JSONResponse(status_code=404, content={"detail": "Diagnostic run not found"})
+
+    @app.exception_handler(FindingNotFound)
+    async def missing_finding(request, exc):
+        return JSONResponse(status_code=404, content={"detail": "Finding not found"})
 
     @app.exception_handler(DuplicateService)
     async def duplicate_service(request, exc):
@@ -91,7 +110,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def ready():
         try:
             with engine.connect() as connection:
-                for model in (Service, LogBatch, LogEvent, IngestionError):
+                for model in (
+                    Service,
+                    LogBatch,
+                    LogEvent,
+                    IngestionError,
+                    DiagnosticRun,
+                    Finding,
+                    FindingEvent,
+                ):
                     connection.execute(select(model).limit(1))
         except SQLAlchemyError:
             return JSONResponse(status_code=503, content={"status": "not_ready"})
