@@ -1,9 +1,8 @@
 # IT Ops Lab
 
-An IT operations and log diagnostics portfolio project. Milestones 1–6 provide a FastAPI foundation, SQLite service inventory,
+An IT operations and log diagnostics portfolio project. Milestones 1–7 provide a FastAPI foundation, SQLite service inventory,
 validated JSON Lines ingestion, log search, SQL summaries, rule-based diagnostics,
-and registered public-only network checks.
-A web interface is not implemented yet.
+registered public-only network checks, and a React investigation dashboard.
 
 ## Install
 
@@ -323,7 +322,7 @@ Check migration state with `python -m alembic current` and model consistency wit
 `python -m ruff format --check .` to verify the full application. Tests use isolated,
 migrated temporary databases, including mixed/invalid records and rollback checks.
 The existing destructive reset commands also remove all batches, events and errors.
-Background ingestion, a frontend, and automated diagnosis are not included.
+Background ingestion and automated root-cause conclusions are not included.
 
 
 ## Log search and SQL analysis (Milestone 4)
@@ -671,7 +670,7 @@ Known limits: literal phrase coverage can miss other wording or match quoted err
 analysis is batch-local and synchronous, bounded to 10,000 events, with up to three
 findings. Evidence detail returns all supporting messages, so it can be large and
 may contain sensitive original input; use synthetic logs. Diagnostic text is static,
-and logs are never executed. No background processing, scheduling, AI, authentication, deployment, or frontend
+and logs are never executed. No background processing, scheduling, AI, authentication or deployment
 is included. Network checks are documented below.
 
 
@@ -807,5 +806,105 @@ pinned HTTP adapter (`network_transport.py`), persistence (`network_targets.py`)
 routes (`network_routes.py`). Models/migration add target/result tables and history
 indexes. Automated tests mock all external operations, exercise security restrictions
 and verify migration preservation; run the existing pytest/Ruff commands above.
-No scanners, authentication, infrastructure, background jobs or frontend are added.
-Milestone 7 is not started.
+No scanners, authentication, infrastructure or background jobs are added.
+The web dashboard is documented below.
+
+
+## Web dashboard (Milestone 7)
+
+React + TypeScript + Vite + React Router + native Fetch, with plain CSS and the
+existing FastAPI/SQLite backend. The dashboard provides an operations-focused navy
+sidebar, light workspace, compact tables, status labels, responsive navigation and
+keyboard focus controls. No framework, analytics, authentication or polling is added.
+
+![Operations overview with synthetic persisted data](docs/screenshots/overview.png)
+
+### Run locally on Windows PowerShell
+
+Install Python 3.12 and Node 24 LTS. From the repository root, backend terminal:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e '.[dev]'
+python -m alembic upgrade head
+python -m uvicorn app.main:create_app --factory --reload --host 127.0.0.1
+```
+
+If creating the environment for the first time, run `py -3.12 -m venv .venv` first.
+If activation is restricted, use `.\.venv\Scripts\python.exe` directly.
+In a second terminal:
+
+```powershell
+cd frontend
+npm ci
+npm run dev
+```
+
+`npm install` also works; `npm ci` installs the committed lockfile. Open the local
+frontend at `http://127.0.0.1:5173`; FastAPI is at `http://127.0.0.1:8000` and its
+Swagger docs at `/docs`. Vite proxies `/api` to FastAPI; both remain bound to localhost,
+without broad CORS permissions. No public deployment or database browser access is
+introduced. `frontend/.env.example` documents optional `VITE_API_BASE_URL` and
+`VITE_API_TIMEOUT_MS` overrides; leave the base empty for the proxy.
+
+### Use the workspace
+
+- **Overview:** exact service/event/error/warning counts and recent persisted findings
+  and network observations. Unavailable values remain unavailable, not zero.
+- **Services:** page through registered applications, create a service, inspect its
+  details and follow its Logs/Network links.
+- **Logs:** search by all existing filters, open event metadata, and upload raw JSONL.
+  Select the Retail POS service, choose `samples/retail-pos.jsonl`, then Upload logs.
+  Review accepted/rejected counts, ingestion errors and links to batch evidence.
+- **Diagnostics:** select service and uploaded batch, click Run diagnostics, and
+  inspect findings plus their supporting events. History is selectable; refreshing
+  does not execute another run.
+- **Network Checks:** register DNS/TCP/HTTP targets, select one, and explicitly click
+  Run. Review observation time, duration, failure code and historical detail. All
+  backend public-destination restrictions remain enforced.
+
+For the POS sample, upload eight records, filter ERROR to see three database timeouts,
+then run diagnostics to produce two HIGH findings supported by those events. Current
+network observations cannot establish the cause of historical application failures.
+Use only authorized public targets; use the existing offline mock demonstration for
+repeatable simulated network results rather than enabling private addresses.
+
+Three narrowly scoped read-only endpoints support accurate overview and discovery:
+
+```text
+GET /api/v1/dashboard
+GET /api/v1/services/{service_id}/log-batches
+GET /api/v1/log-batches/{batch_id}/diagnostic-runs
+```
+
+No schema migration or existing write-contract change was required. All operations
+still use FastAPI validation and persistence; the frontend never opens SQLite.
+
+### Validate the dashboard
+
+```powershell
+# Backend, repository root
+python -m pytest
+python -m ruff check .
+python -m ruff format --check .
+# Frontend
+cd frontend
+npm test
+npm run typecheck
+npm run build
+```
+
+Screenshots include [desktop logs](docs/screenshots/logs.png) and
+[narrow-screen logs](docs/screenshots/logs-mobile.png). They show synthetic persisted
+data from Chromium verification against a disposable database; network observations
+used controlled mocks, not external services. See [Dashboard architecture and
+walkthrough](docs/dashboard.md) for state management, API integration, pagination,
+error handling, screenshot instructions and extension guidance.
+
+Known limits: local development only; no production asset hosting, authentication,
+real-time updates or background polling. Offset pages may shift during concurrent
+writes. The summary follows service/batch/time filters, while the event table also
+supports severity/message filters; the UI labels this distinction. Client timeouts
+cannot guarantee cancellation of a server write—check history before retrying.
+Windows setup is documented; browser verification ran on Linux Chromium. Full
+screen-reader auditing has not been performed. Milestone 8 is not started.
