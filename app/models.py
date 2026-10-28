@@ -94,3 +94,40 @@ class FindingEvent(Base):
 
     finding_id: Mapped[int] = mapped_column(ForeignKey("findings.id"), primary_key=True)
     event_id: Mapped[int] = mapped_column(ForeignKey("log_events.id"), primary_key=True)
+
+
+class CheckTarget(Base):
+    __tablename__ = "check_targets"
+    __table_args__ = (
+        CheckConstraint("check_type IN ('DNS', 'TCP', 'HTTP')", name="ck_target_type"),
+        CheckConstraint("port IS NULL OR (port >= 1 AND port <= 65535)", name="ck_target_port"),
+        Index("ix_check_targets_service_id", "service_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    service_id: Mapped[int] = mapped_column(ForeignKey("services.id"))
+    name: Mapped[str] = mapped_column(String(100))
+    check_type: Mapped[str] = mapped_column(String(10))
+    host: Mapped[str] = mapped_column(String(253))
+    port: Mapped[int | None] = mapped_column()
+    scheme: Mapped[str | None] = mapped_column(String(5))
+    path: Mapped[str | None] = mapped_column(String(2048))
+    enabled: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(), default=lambda: datetime.now(UTC))
+
+
+class CheckResult(Base):
+    __tablename__ = "check_results"
+    __table_args__ = (
+        CheckConstraint("outcome IN ('success', 'failure')", name="ck_check_outcome"),
+        Index("ix_check_results_target_checked", "target_id", "checked_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    target_id: Mapped[int] = mapped_column(ForeignKey("check_targets.id"))
+    outcome: Mapped[str] = mapped_column(String(10))
+    duration_ms: Mapped[float] = mapped_column()
+    error_code: Mapped[str | None] = mapped_column(String(50))
+    status_code: Mapped[int | None] = mapped_column()
+    details_json: Mapped[dict] = mapped_column(JSON())
+    checked_at: Mapped[datetime] = mapped_column(DateTime(), default=lambda: datetime.now(UTC))

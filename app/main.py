@@ -19,6 +19,8 @@ from app.log_routes import router as log_router
 from app.log_search import EventNotFound
 from app.logging import configure_logging
 from app.models import (
+    CheckResult,
+    CheckTarget,
     DiagnosticRun,
     Finding,
     FindingEvent,
@@ -27,6 +29,8 @@ from app.models import (
     LogEvent,
     Service,
 )
+from app.network_routes import router as network_router
+from app.network_targets import ResultNotFound, TargetDisabled, TargetInvalid, TargetNotFound
 from app.routes import router
 from app.search_routes import router as search_router
 
@@ -51,6 +55,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(log_router)
     app.include_router(search_router)
     app.include_router(diagnostic_router)
+    app.include_router(network_router)
+
+    @app.exception_handler(TargetNotFound)
+    async def missing_target(request, exc):
+        return JSONResponse(status_code=404, content={"detail": "Check target not found"})
+
+    @app.exception_handler(ResultNotFound)
+    async def missing_result(request, exc):
+        return JSONResponse(status_code=404, content={"detail": "Check result not found"})
+
+    @app.exception_handler(TargetInvalid)
+    async def invalid_target(request, exc):
+        return JSONResponse(
+            status_code=409, content={"detail": "Stored target configuration is invalid"}
+        )
+
+    @app.exception_handler(TargetDisabled)
+    async def disabled_target(request, exc):
+        return JSONResponse(status_code=409, content={"detail": "Check target is disabled"})
 
     @app.exception_handler(RunNotFound)
     async def missing_run(request, exc):
@@ -118,6 +141,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     DiagnosticRun,
                     Finding,
                     FindingEvent,
+                    CheckTarget,
+                    CheckResult,
                 ):
                     connection.execute(select(model).limit(1))
         except SQLAlchemyError:

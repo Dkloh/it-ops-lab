@@ -21,3 +21,5 @@ class Settings(BaseSettings):
         if not value.startswith("sqlite:///") or value == "sqlite:///":
             raise ValueError("database_url must be a SQLite URL with a database path")
         return value
+
+    network_timeout_seconds: float = Field(default=3.0, ge=0.1, le=10.0)
