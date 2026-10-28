@@ -168,9 +168,10 @@ has not been performed.
    `checked_at` to the historical log times.
 6. Return to Overview for actual counts and links to the new findings/observations.
 
-For repeatable offline backend observations, use the existing
-`scripts/demo_network_diagnostics.py`; it intentionally uses its own temporary
-ASGI-test workflow, so it does not populate your dashboard's database. Dashboard
+For a repeatable offline dashboard, use the existing
+`scripts/demo_network_diagnostics.py --database NEW_FILE.db` option, described in
+[the release walkthrough](demo-walkthrough.md). It refuses existing files and disables
+retained simulated targets. Without that option, the console demo remains temporary. Dashboard
 browser verification instead used a disposable SQLite file and a test-only backend
 network mock. No simulation bypass is added to the application UI or production
 network code. Captured screenshots use synthetic persisted data, and the network
