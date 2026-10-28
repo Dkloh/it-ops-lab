@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Index, String, UniqueConstraint
+from sqlalchemy import JSON, CheckConstraint, DateTime, ForeignKey, Index, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -55,3 +55,42 @@ class IngestionError(Base):
     batch_id: Mapped[int] = mapped_column(ForeignKey("log_batches.id"), index=True)
     line_number: Mapped[int] = mapped_column()
     reason: Mapped[str] = mapped_column(String(100))
+
+
+class DiagnosticRun(Base):
+    __tablename__ = "diagnostic_runs"
+    __table_args__ = (CheckConstraint("status IN ('running', 'completed')", name="ck_run_status"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    batch_id: Mapped[int] = mapped_column(ForeignKey("log_batches.id"))
+    ruleset_version: Mapped[str] = mapped_column(String(20))
+    status: Mapped[str] = mapped_column(String(20))
+    started_at: Mapped[datetime] = mapped_column(DateTime())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime())
+
+
+class Finding(Base):
+    __tablename__ = "findings"
+    __table_args__ = (
+        UniqueConstraint("run_id", "rule_code", name="uq_finding_run_rule"),
+        CheckConstraint("severity IN ('HIGH', 'MEDIUM')", name="ck_finding_severity"),
+        CheckConstraint("event_count > 0", name="ck_finding_event_count"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("diagnostic_runs.id"))
+    rule_code: Mapped[str] = mapped_column(String(100))
+    severity: Mapped[str] = mapped_column(String(20))
+    summary: Mapped[str] = mapped_column(String())
+    explanation: Mapped[str] = mapped_column(String())
+    suggested_action: Mapped[str] = mapped_column(String())
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime())
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime())
+    event_count: Mapped[int] = mapped_column()
+
+
+class FindingEvent(Base):
+    __tablename__ = "finding_events"
+
+    finding_id: Mapped[int] = mapped_column(ForeignKey("findings.id"), primary_key=True)
+    event_id: Mapped[int] = mapped_column(ForeignKey("log_events.id"), primary_key=True)

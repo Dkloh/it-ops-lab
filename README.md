@@ -1,7 +1,8 @@
 # IT Ops Lab
 
-An IT operations and log diagnostics portfolio project. Milestones 1–4 provide a FastAPI foundation, SQLite service inventory,
-validated JSON Lines ingestion, log search, and SQL summaries. Diagnostics and a web interface are not implemented yet.
+An IT operations and log diagnostics portfolio project. Milestones 1–5 provide a FastAPI foundation, SQLite service inventory,
+validated JSON Lines ingestion, log search, SQL summaries, and rule-based diagnostics.
+A web interface is not implemented yet.
 
 ## Install
 
@@ -33,7 +34,7 @@ curl --fail http://127.0.0.1:8000/health/ready
 # {"status":"ready"}
 ```
 
-Liveness confirms the process can serve requests. Readiness queries the service and ingestion tables and returns HTTP 503 with
+Liveness confirms the process can serve requests. Readiness queries the service, ingestion, and diagnostic tables and returns HTTP 503 with
 `{"status":"not_ready"}` if the database is unavailable or unmigrated.
 Liveness remains independent of database availability.
 
@@ -177,7 +178,7 @@ Pydantic serializes the returned model. The session closes after the request.
 Unique conflicts and missing services map to 409 and 404 responses respectively.
 
 SQLite suits a small local application; concurrent writes are limited. Readiness
-checks connectivity and the service and ingestion schemas, not write permissions or every possible
+checks connectivity and the service, ingestion, and diagnostic schemas, not write permissions or every possible
 schema drift. It does not replace running migrations. No deletion endpoint,
 authentication, database retry policy, or automatic backups are included.
 
@@ -509,4 +510,165 @@ actual SQL learning examples with isolated temporary databases.
 
 Read [SQL investigations](docs/sql-investigations.md) for five runnable SQLite
 queries, their SQLAlchemy equivalents, and index trade-offs. No additional service
-or library is required. Milestone 5 diagnostics are not implemented.
+or library is required. Rule-based diagnostics are documented below.
+
+
+## Rule-based diagnostics (Milestone 5)
+
+The engine analyzes previously ingested events in one batch, using ruleset **1.0.0**:
+
+| Code | Pattern | Qualifying severities | Minimum / inclusive window | Finding severity |
+| --- | --- | --- | --- | --- |
+| `REPEATED_TIMEOUTS` | Connection/request timeouts | ERROR, CRITICAL | 3 / 5 minutes | HIGH |
+| `REPEATED_AUTH_FAILURES` | Authentication/login failures | WARNING, ERROR, CRITICAL | 5 / 10 minutes | MEDIUM |
+| `DATABASE_CONNECTION_ERRORS` | Database connection or pool errors | ERROR, CRITICAL | 2 / 5 minutes | HIGH |
+
+Phrases are matched as case-insensitive literal substrings. Each rule produces at
+most one finding containing the union of events from all qualifying rolling windows.
+Overlapping windows never duplicate evidence, and unrelated events are excluded.
+Different rules can legitimately reference the same events. See
+[Diagnostic engine](docs/diagnostic-engine.md) for every phrase, window algorithm,
+schema, transaction behavior, diagram, and support-engineering use cases.
+
+### Install and migrate (Windows PowerShell)
+
+From the repository root (create the virtual environment as shown above if needed):
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e '.[dev]'
+python -m alembic upgrade head
+python -m alembic current
+python -m uvicorn app.main:create_app --factory --reload
+```
+
+If activation is restricted, substitute `.\.venv\Scripts\python.exe` for `python`.
+Use the same `IT_OPS_DATABASE_URL` for migrations and the server. The migration adds
+new tables without modifying services, batches, or events. For a deliberate rollback,
+stop the server and run `python -m alembic downgrade 67136625fb8f`: this **deletes all
+diagnostic history**, while preserving earlier logs and inventory. Reapply with
+`python -m alembic upgrade head`. Test migration cycles against disposable databases,
+not a database containing diagnostic history you need to retain.
+
+### Reproduce the Retail POS investigation
+
+In a second PowerShell window:
+
+```powershell
+$base = 'http://127.0.0.1:8000'
+# Reuse the registered demo service, or create it if missing.
+$services = Invoke-RestMethod "$base/api/v1/services?limit=100"
+$service = $services | Where-Object { $_.name -eq 'retail-pos' -and $_.environment -eq 'demo' } | Select-Object -First 1
+if (-not $service) {
+    $service = Invoke-RestMethod -Method Post -Uri "$base/api/v1/services" `
+      -ContentType 'application/json' -Body '{"name":"retail-pos","environment":"demo"}'
+}
+$batch = Invoke-RestMethod -Method Post `
+  -Uri "$base/api/v1/services/$($service.id)/log-batches?filename=retail-pos.jsonl" `
+  -ContentType 'application/x-ndjson' -InFile '.\samples\retail-pos.jsonl'
+$errors = Invoke-RestMethod "$base/api/v1/log-events?batch_id=$($batch.id)&severity=ERROR&limit=100"
+$errors.items | Format-Table id, occurred_at, severity, message
+
+# POST takes no body and creates a new historical run each time.
+$run = Invoke-RestMethod -Method Post `
+  -Uri "$base/api/v1/log-batches/$($batch.id)/diagnostic-runs"
+$run | Select-Object id, batch_id, service_id, ruleset_version, status, finding_count
+$run.findings | Format-Table id, rule_code, severity, event_count, first_seen_at, last_seen_at
+
+$storedRun = Invoke-RestMethod "$base/api/v1/diagnostic-runs/$($run.id)"
+$findingId = $storedRun.findings[0].id
+$finding = Invoke-RestMethod "$base/api/v1/findings/$findingId"
+$finding.evidence | Format-Table id, occurred_at, severity, source, message
+# The sample's two findings reference exactly the three original ERROR IDs.
+Compare-Object ($errors.items.id | Sort-Object) ($finding.event_ids | Sort-Object)
+```
+
+No `Compare-Object` output means these sets agree for this sample. If more than 100
+services exist, page through the inventory to locate the existing service. Use
+batch filtering so repeated sample uploads do not alter the investigation scope.
+PowerShell examples are documented; Linux HTTP tests validate the workflow.
+
+Equivalent diagnostic requests with curl:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/log-batches/1/diagnostic-runs
+curl http://127.0.0.1:8000/api/v1/diagnostic-runs/1
+curl http://127.0.0.1:8000/api/v1/findings/1
+```
+
+A POS run returns **HTTP 201**. Example response excerpt (IDs and times vary;
+full finding objects also include static summary, explanation, suggested_action,
+and first/last timestamps):
+
+```json
+{
+  "id": 1,
+  "batch_id": 1,
+  "service_id": 1,
+  "ruleset_version": "1.0.0",
+  "status": "completed",
+  "started_at": "2026-10-28T13:00:00Z",
+  "finished_at": "2026-10-28T13:00:01Z",
+  "finding_count": 2,
+  "findings": [
+    {"id":1,"run_id":1,"rule_code":"DATABASE_CONNECTION_ERRORS","severity":"HIGH","event_count":3,"event_ids":[3,4,6]},
+    {"id":2,"run_id":1,"rule_code":"REPEATED_TIMEOUTS","severity":"HIGH","event_count":3,"event_ids":[3,4,6]}
+  ]
+}
+```
+
+GET a finding adds `batch_id`, `service_id`, and `evidence` to its summary fields.
+Example evidence excerpt:
+
+```json
+{"id":3,"occurred_at":"2026-10-27T13:05:00Z","severity":"ERROR","source":"pos-api","message":"Database connection timed out"}
+```
+
+The POS sample produces three evidence IDs for each of two HIGH findings, spanning
+13:05–13:07 UTC. The authentication warning alone does not trigger a finding.
+The separate `samples/auth-failures.jsonl` triggers one MEDIUM authentication
+finding supported by five events within exactly ten minutes. Upload it to a service
+using the same raw-file endpoint and POST diagnostics for that batch.
+
+A valid batch with no qualifying pattern returns a completed run with
+`finding_count: 0` and `findings: []`. Repeating POST on any batch creates separate
+historical run/finding IDs. GET reads stored results, never reanalyzes or changes
+historical findings. Each record includes its ruleset version. Future rule changes
+must increment the version rather than rewriting history.
+
+### Swagger and troubleshooting
+
+Open the local `/docs` page, expand **diagnostics**, and choose **Try it out** on
+POST `/api/v1/log-batches/{batch_id}/diagnostic-runs`. Enter an uploaded batch ID,
+execute without a request body, then use the returned run and finding IDs in the
+GET endpoints. Response models show every field and the full evidence shape.
+
+| Symptom | Investigation |
+| --- | --- |
+| 404 | Verify the batch, run, or finding ID exists in the configured database. |
+| 422 | IDs must be positive integers within SQLite's signed 64-bit range. |
+| Completed with zero findings | Inspect accepted events, phrases, severities and event-time spans. Different batches never combine. Threshold-minus-one does not qualify. |
+| 503 readiness | Apply migrations with the same database URL as the server. |
+| 500 | Inspect local server logs for database availability, write permissions, locking or processing failure. The failed attempt is rolled back; earlier data remains. Resolve the cause before retrying. |
+| Multiple runs for one batch | Expected: each POST records a new historical analysis; duplicate rules within one run are prevented. |
+| Finding spans longer than its window | Evidence is the union of all qualifying clusters; each event belongs to a threshold-satisfying window. |
+
+For the sample, an incident hypothesis is intermittent upstream/database connectivity
+or connection-pool pressure. Cite the service, batch/run IDs, ruleset version,
+finding IDs, event counts and UTC times. Check database/upstream health, network
+reachability and pool configuration next. Neither a timeout finding nor repeated
+authentication failures alone confirms downtime, compromise, or a root cause.
+
+New modules separate pure rules (`app/diagnostic_rules.py`), transactional persistence
+(`app/diagnostics.py`), HTTP adapters (`app/diagnostic_routes.py`), and Pydantic
+contracts (`app/diagnostic_schemas.py`). Models/migration add run, finding and
+evidence tables. `tests/test_diagnostic_rules.py` and `tests/test_diagnostics.py`
+cover detection, integration, history, migrations and rollback. No extra dependency
+is needed. Run the full pytest and Ruff commands above after changes.
+
+Known limits: literal phrase coverage can miss other wording or match quoted errors;
+analysis is batch-local and synchronous, bounded to 10,000 events, with up to three
+findings. Evidence detail returns all supporting messages, so it can be large and
+may contain sensitive original input; use synthetic logs. Diagnostic text is static,
+and logs are never executed. No background processing, scheduling, network checks,
+AI, authentication, deployment, or frontend is included. Milestone 6 is not started.
