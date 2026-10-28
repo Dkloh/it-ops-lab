@@ -224,3 +224,18 @@ __marimo__/
 *.db-shm
 *.db-wal
 *.db-journal
+
+# Local SQLite variants and environment overrides (retain safe examples)
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+.env.*
+!.env.example
+
+# Optional isolated audit tooling
+.audit-venv/

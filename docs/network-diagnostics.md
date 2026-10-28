@@ -200,3 +200,7 @@ This maps to CCNA concepts: name-to-address resolution, Layer 3 routing versus L
 connection establishment, port/listener behavior, and application-layer protocols.
 TLS adds identity verification, not a guarantee of business correctness. Separate
 those layers and cite observed times rather than guessing one cause from one symptom.
+
+For retained portfolio data, see the [release walkthrough](demo-walkthrough.md).
+The same script accepts `--database NEW_FILE.db`, refuses existing files and disables
+its retained simulated targets before the ordinary dashboard opens them.

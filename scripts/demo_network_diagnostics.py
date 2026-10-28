@@ -1,7 +1,9 @@
 """Offline POS investigation using temporary SQLite and controlled network mocks."""
 
+import argparse
 import json
 import os
+from contextlib import ExitStack
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -9,18 +11,35 @@ from unittest.mock import patch
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.main import create_app
+from app.models import CheckTarget
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def demonstrate():
+def demonstrate(database: Path | None = None):
+    with ExitStack() as stack:
+        if database is None:
+            directory = stack.enter_context(TemporaryDirectory())
+            destination = Path(directory) / "demo.db"
+        else:
+            destination = database.expanduser().absolute()
+            if any(char in str(destination) for char in ("?", "#", "\x00")):
+                raise ValueError("Demo database paths cannot contain URL metacharacters")
+            if destination.suffix.lower() not in {".db", ".sqlite", ".sqlite3"}:
+                raise ValueError("Choose a new .db, .sqlite or .sqlite3 file")
+            # Exclusive creation refuses existing files AND symlinks; never delete user data.
+            with destination.open("xb"):
+                pass
+        return populate(destination, retained=database is not None)
+
+
+def populate(destination: Path, retained: bool):
     with (
-        TemporaryDirectory() as directory,
-        patch.dict(
-            os.environ, {"IT_OPS_DATABASE_URL": f"sqlite:///{Path(directory).as_posix()}/demo.db"}
-        ),
+        patch.dict(os.environ, {"IT_OPS_DATABASE_URL": f"sqlite:///{destination.as_posix()}"}),
         patch("app.network_checks.resolve", return_value=["93.184.216.34"]),
         patch("app.network_checks.connect_tcp", side_effect=TimeoutError),
         patch(
@@ -59,8 +78,22 @@ def demonstrate():
                 assert client.get(f"/api/v1/check-results/{result['id']}").json() == result
                 observations.append(result)
             assert [row["error_code"] for row in observations] == [None, "TIMEOUT", "HTTP_STATUS"]
+            if retained:
+                # Seeded observations are simulated. Prevent accidental live reruns when
+                # this file is later opened by the ordinary, non-mocked local API.
+                with Session(client.app.state.engine) as session:
+                    for target in session.scalars(
+                        select(CheckTarget).where(CheckTarget.service_id == service["id"])
+                    ):
+                        target.enabled = False
+                    session.commit()
             return {
-                "mode": "SIMULATED: no external requests; temporary database only",
+                "mode": "SIMULATED: no external requests",
+                "database": str(destination) if retained else "temporary (removed after demo)",
+                "retained_targets_disabled": retained,
+                "service_id": service["id"],
+                "batch_id": batch["id"],
+                "run_id": findings["id"],
                 "historical_error_times": [row["occurred_at"] for row in errors["items"]],
                 "diagnostic_rules": [finding["rule_code"] for finding in findings["findings"]],
                 "observations": observations,
@@ -70,4 +103,14 @@ def demonstrate():
 
 
 if __name__ == "__main__":
-    print(json.dumps(demonstrate(), indent=2))
+    parser = argparse.ArgumentParser(description="Offline synthetic POS demonstration")
+    parser.add_argument(
+        "--database",
+        type=Path,
+        help="Retain a NEW disposable SQLite file; existing paths are refused",
+    )
+    args = parser.parse_args()
+    try:
+        print(json.dumps(demonstrate(args.database), indent=2))
+    except (FileExistsError, ValueError, FileNotFoundError) as exc:
+        parser.exit(2, f"Demo refused: {exc}\n")
